@@ -1,5 +1,5 @@
 [package]
-name = "utxo_loader"
+name = "secp256-cuda"
 version = "0.1.0"
 edition = "2021"
 
