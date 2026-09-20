@@ -30,10 +30,14 @@ fn window_bits_from_env() -> u32 {
     bits
 }
 
-/// Threads par bloc CUDA (modifiable avec GPU_BLOCK_SIZE pour les essais)
-fn block_size() -> u32 {
+/// Threads par bloc CUDA (modifiable avec GPU_BLOCK_SIZE pour les essais).
+/// Le defaut depend du GPU (`capability` = 61 pour 6.1), mesure avec test9_condition en mode endo :
+///   GTX 1080 Ti (6.1) : 32 -> 54.8 M cles/s, 64 -> 45.9, 128 -> 44.1, 16 -> 30.1
+///   RTX 5060 (12.0)   : 128
+fn block_size(capability: u32) -> u32 {
     match std::env::var("GPU_BLOCK_SIZE") {
         Ok(v) => v.parse().expect("GPU_BLOCK_SIZE must be a number"),
+        Err(_) if capability < 70 => 32, // Pascal et avant
         Err(_) => 128,
     }
 }
@@ -123,6 +127,7 @@ pub struct GpuContext {
     buffers: Option<BatchBuffers>,
     table: DeviceBuffer<u32>,
     window_bits: u32,
+    block_size: u32,
     /// Intervalles du filtre GPU (10 mots par intervalle) et leur nombre
     match_ranges: Option<(DeviceBuffer<u32>, u32)>,
     module: Module,
@@ -241,19 +246,15 @@ fn table_looks_valid(table: &[u32]) -> bool {
 /// Choisit, parmi les PTX compiles par build.rs (un par architecture), le plus proche du GPU :
 /// le driver sait recompiler un PTX pour un GPU plus recent que sa cible, pas plus ancien.
 ///   GTX 1080 Ti = compute capability 6.1 -> sm_61,  RTX 50XX = 12.0 -> sm_120
-fn select_ptx(device: &Device) -> Result<String, Box<dyn Error>> {
-    let major = device.get_attribute(DeviceAttribute::ComputeCapabilityMajor)?;
-    let minor = device.get_attribute(DeviceAttribute::ComputeCapabilityMinor)?;
-    let capability = (major * 10 + minor) as u32;
-
+fn select_ptx(capability: u32) -> Result<String, Box<dyn Error>> {
     let arch = env!("CUDA_KERNEL_ARCHS")
         .split(',')
         .map(|a| a.parse::<u32>().expect("set by build.rs"))
         .filter(|&a| a <= capability)
         .max()
         .ok_or_else(|| format!(
-            "no CUDA kernel for compute capability {}.{} (compiled: sm_{}), rebuild with CUDA_ARCH=sm_{}",
-            major, minor, env!("CUDA_KERNEL_ARCHS").replace(',', ", sm_"), capability
+            "no CUDA kernel for GPU architecture sm_{} (compiled: sm_{}), rebuild with CUDA_ARCH=sm_{}",
+            capability, env!("CUDA_KERNEL_ARCHS").replace(',', ", sm_"), capability
         ))?;
 
     let path = Path::new(env!("CUDA_KERNEL_DIR")).join(format!("secp256k1_kernel.sm_{}.ptx", arch));
@@ -270,8 +271,13 @@ impl GpuContext {
         let _context = Context::create_and_push(ContextFlags::MAP_HOST, device)?;
         let stream = Stream::new(StreamFlags::DEFAULT, None)?;
 
+        // Compute capability, ex: 6.1 -> 61, 12.0 -> 120
+        let major = device.get_attribute(DeviceAttribute::ComputeCapabilityMajor)?;
+        let minor = device.get_attribute(DeviceAttribute::ComputeCapabilityMinor)?;
+        let capability = (major * 10 + minor) as u32;
+
         // Charger le module PTX
-        let ptx_path = select_ptx(&device)?;
+        let ptx_path = select_ptx(capability)?;
         println!("[GPU] Kernel: {}", ptx_path);
         let ptx_cstr = CString::new(ptx_path)?;
         let module = Module::load_from_file(&ptx_cstr)?;
@@ -281,13 +287,15 @@ impl GpuContext {
         let host_table = load_or_build_base_table(window_bits);
         let table = DeviceBuffer::from_slice(&host_table)?;
 
-        println!("[GPU] Initialized: Device={:?}", device.name()?);
+        let block_size = block_size(capability);
+        println!("[GPU] Initialized: Device={:?}, block size {}", device.name()?, block_size);
 
         Ok(GpuContext {
             slots: Default::default(),
             buffers: None,
             table,
             window_bits,
+            block_size,
             match_ranges: None,
             module,
             stream,
@@ -316,16 +324,17 @@ impl GpuContext {
             self.buffers = None;
             self.buffers = Some(BatchBuffers::with_capacity(num_keys)?);
         }
+        let num_blocks = self.num_blocks(num_keys);
+        let block_size = self.block_size;
         let buffers = self.buffers.as_mut().unwrap();
         let bytes = num_keys * 32;
 
         buffers.private_keys[..bytes].copy_from(private_keys)?;
 
-        let num_blocks = Self::num_blocks(num_keys);
         let module = &self.module;
         let stream = &self.stream;
         unsafe {
-            launch!(module.derive_public_keys_batch<<<num_blocks, block_size(), 0, stream>>>(
+            launch!(module.derive_public_keys_batch<<<num_blocks, block_size, 0, stream>>>(
                 buffers.private_keys.as_device_ptr(),
                 self.table.as_device_ptr(),
                 buffers.public_x.as_device_ptr(),
@@ -344,9 +353,9 @@ impl GpuContext {
     }
 
     /// Chaque thread GPU traite `keys_per_thread()` cles
-    fn num_blocks(num_keys: usize) -> u32 {
+    fn num_blocks(&self, num_keys: usize) -> u32 {
         let num_threads = (num_keys as u32 + keys_per_thread() - 1) / keys_per_thread();
-        (num_threads + block_size() - 1) / block_size()
+        (num_threads + self.block_size - 1) / self.block_size
     }
 
     // ---- Lots asynchrones ----
@@ -412,12 +421,13 @@ impl GpuContext {
         job: SlotJob,
         out_bytes: usize,
     ) -> Result<(), Box<dyn Error>> {
+        let num_blocks = self.num_blocks(num_keys);
+        let block_size = self.block_size;
         let s = self.slots[slot].as_mut().expect("call slot_keys_mut first");
         assert!(s.in_flight.is_none(), "slot {} has a batch in flight", slot);
         assert!(num_keys > 0 && num_keys <= s.capacity);
         s.ensure_out(out_bytes)?;
 
-        let num_blocks = Self::num_blocks(num_keys);
         let module = &self.module;
         let stream = &s.stream;
         // Les buffers appartiennent au slot et restent en place jusqu'a wait_slot
@@ -425,7 +435,7 @@ impl GpuContext {
             s.d_keys[..num_keys * 32].async_copy_from(&s.h_keys[..num_keys * 32], stream)?;
 
             match job {
-                SlotJob::Hash160 => launch!(module.derive_hash160_batch<<<num_blocks, block_size(), 0, stream>>>(
+                SlotJob::Hash160 => launch!(module.derive_hash160_batch<<<num_blocks, block_size, 0, stream>>>(
                     s.d_keys.as_device_ptr(),
                     self.table.as_device_ptr(),
                     s.d_out.as_device_ptr(),
@@ -435,7 +445,7 @@ impl GpuContext {
                 ))?,
                 SlotJob::Match => {
                     let (ranges, num_ranges) = self.match_ranges.as_mut().unwrap();
-                    launch!(module.derive_match_batch<<<num_blocks, block_size(), 0, stream>>>(
+                    launch!(module.derive_match_batch<<<num_blocks, block_size, 0, stream>>>(
                         s.d_keys.as_device_ptr(),
                         self.table.as_device_ptr(),
                         ranges.as_device_ptr(),
