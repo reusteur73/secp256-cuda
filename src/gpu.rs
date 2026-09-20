@@ -1,6 +1,7 @@
 // Module GPU pour CUDA acceleration de secp256k1
 
 use rayon::prelude::*;
+use rustacuda::device::DeviceAttribute;
 use rustacuda::launch;
 use rustacuda::memory::{AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use rustacuda::prelude::*;
@@ -237,18 +238,41 @@ fn table_looks_valid(table: &[u32]) -> bool {
     table[..8] == GX && table[8..16] == GY
 }
 
+/// Choisit, parmi les PTX compiles par build.rs (un par architecture), le plus proche du GPU :
+/// le driver sait recompiler un PTX pour un GPU plus recent que sa cible, pas plus ancien.
+///   GTX 1080 Ti = compute capability 6.1 -> sm_61,  RTX 50XX = 12.0 -> sm_120
+fn select_ptx(device: &Device) -> Result<String, Box<dyn Error>> {
+    let major = device.get_attribute(DeviceAttribute::ComputeCapabilityMajor)?;
+    let minor = device.get_attribute(DeviceAttribute::ComputeCapabilityMinor)?;
+    let capability = (major * 10 + minor) as u32;
+
+    let arch = env!("CUDA_KERNEL_ARCHS")
+        .split(',')
+        .map(|a| a.parse::<u32>().expect("set by build.rs"))
+        .filter(|&a| a <= capability)
+        .max()
+        .ok_or_else(|| format!(
+            "no CUDA kernel for compute capability {}.{} (compiled: sm_{}), rebuild with CUDA_ARCH=sm_{}",
+            major, minor, env!("CUDA_KERNEL_ARCHS").replace(',', ", sm_"), capability
+        ))?;
+
+    let path = Path::new(env!("CUDA_KERNEL_DIR")).join(format!("secp256k1_kernel.sm_{}.ptx", arch));
+    Ok(path.to_str().expect("UTF-8 path").to_string())
+}
+
 impl GpuContext {
     /// Initialiser le contexte GPU
     pub fn new() -> Result<Self, Box<dyn Error>> {
         rustacuda::init(CudaFlags::empty())?;
 
-        // Selectionner GPU 0 (RTX 5060)
+        // Selectionner GPU 0
         let device = Device::get_device(0)?;
         let _context = Context::create_and_push(ContextFlags::MAP_HOST, device)?;
         let stream = Stream::new(StreamFlags::DEFAULT, None)?;
 
         // Charger le module PTX
-        let ptx_path = env!("CUDA_KERNEL_PTX");
+        let ptx_path = select_ptx(&device)?;
+        println!("[GPU] Kernel: {}", ptx_path);
         let ptx_cstr = CString::new(ptx_path)?;
         let module = Module::load_from_file(&ptx_cstr)?;
 

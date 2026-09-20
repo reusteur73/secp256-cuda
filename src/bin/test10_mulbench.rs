@@ -1,6 +1,6 @@
 // Micro-benchmark des variantes de multiplication modulaire (kernels/bench_mul.cu).
 //
-// Compiler le kernel puis lancer :
+// Compiler le kernel puis lancer (sm_61 pour la GTX 1080 Ti, sm_120 pour les RTX 50XX) :
 //   nvcc -ptx -arch=sm_120 -O3 kernels/bench_mul.cu -o target/bench_mul.ptx
 //   cargo run --bin test10_mulbench --release -- target/bench_mul.ptx
 
