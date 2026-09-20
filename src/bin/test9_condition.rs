@@ -23,12 +23,12 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use utxo_loader::address::{p2pkh_address, prefix_hash160_ranges};
-use utxo_loader::endo::{derived_private_key, NUM_DERIVED};
-use utxo_loader::gpu::Hash160Range;
+use secp256_cuda::address::{p2pkh_address, prefix_hash160_ranges};
+use secp256_cuda::endo::{derived_private_key, NUM_DERIVED};
+use secp256_cuda::gpu::Hash160Range;
 
 mod gpu {
-    pub use utxo_loader::gpu::*;
+    pub use secp256_cuda::gpu::*;
 }
 
 /// Condition testée sur chaque clé générée, à partir du HASH160 de sa clé publique.

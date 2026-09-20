@@ -5,7 +5,7 @@ use rand::RngCore;
 
 // Import le module GPU
 mod gpu {
-    pub use utxo_loader::gpu::*;
+    pub use secp256_cuda::gpu::*;
 }
 
 fn benchmark_gpu(num_keys: usize) -> Result<f64, Box<dyn std::error::Error>> {

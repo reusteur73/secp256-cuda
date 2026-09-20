@@ -5,11 +5,11 @@ use rayon::prelude::*;
 use sha2::{Sha256, Digest};
 use ripemd::Ripemd160;
 
-use utxo_loader::address::prefix_hash160_ranges;
-use utxo_loader::endo::{derived_private_key, NUM_DERIVED};
+use secp256_cuda::address::prefix_hash160_ranges;
+use secp256_cuda::endo::{derived_private_key, NUM_DERIVED};
 
 mod gpu {
-    pub use utxo_loader::gpu::*;
+    pub use secp256_cuda::gpu::*;
 }
 
 /// Clés limites : petites valeurs, n-1, fenêtres à zéro, limbs saturés

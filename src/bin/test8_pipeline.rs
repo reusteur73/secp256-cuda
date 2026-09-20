@@ -15,10 +15,10 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use utxo_loader::address::{p2pkh_address, Address};
+use secp256_cuda::address::{p2pkh_address, Address};
 
 mod gpu {
-    pub use utxo_loader::gpu::*;
+    pub use secp256_cuda::gpu::*;
 }
 
 /// HASH160 de la clé publique compressée (02/03 selon la parité de Y, puis X)

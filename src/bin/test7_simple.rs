@@ -1,7 +1,7 @@
 // Test ultra-simple: k=1 devrait retourner G
 
 mod gpu {
-    pub use utxo_loader::gpu::*;
+    pub use secp256_cuda::gpu::*;
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
